@@ -1,5 +1,6 @@
 import os, io
 import streamlit as st
+import requests
 import pandas as pd
 from openpyxl import Workbook
 from photo_engine import load_checklist, load_mapping, load_raw_data, header_extract, detect_candidates, build_report
