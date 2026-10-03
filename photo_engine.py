@@ -127,7 +127,6 @@ def detect_candidates(img, checklist_df):
     else:
         x1,x2,x3=int(img.shape[1]*.61),int(img.shape[1]*.68),int(img.shape[1]*.75)
     found=[]
-    used=set()
         def has_handwritten_tick(cell):
         if cell is None or cell.size == 0:
             return False
@@ -155,7 +154,7 @@ def detect_candidates(img, checklist_df):
         negative = 0
 
         for ln in lines_h:
-            coords = ln[0] if np.asarray(ln).ndim > 1 else ln
+            coords = ln[0]
             xa, ya, xb, yb = map(int, coords)
 
             dx = xb - xa
@@ -175,11 +174,16 @@ def detect_candidates(img, checklist_df):
 
         return positive >= 1 and negative >= 1
 
+
     for line in lines:
         if line["x"] > x1:
             continue
 
-        match = process.extractOne(line["text"], choices)
+        match = process.extractOne(
+            line["text"],
+            choices,
+            scorer=fuzz.token_set_ratio
+        )
 
         if not match or match[1] < 62:
             continue
@@ -191,13 +195,12 @@ def detect_candidates(img, checklist_df):
             continue
 
         y = line["y"]
-        
 
         ok_cell = gray[y-18:y+18, x1+8:x2-8]
         nok_cell = gray[y-18:y+18, x2+8:x3-8]
 
         ok_tick = has_handwritten_tick(ok_cell)
-        nok_tick = has_handwritten_tiick(nok_cell)
+        nok_tick = has_handwritten_tick(nok_cell)
 
         if nok_tick and not ok_tick:
             state = "NOT OK"
@@ -209,12 +212,14 @@ def detect_candidates(img, checklist_df):
         if state in ("NOT OK", "REVIEW"):
             found.append({
                 "Observation": obs,
-                "OCR Match %": round(conf,1),
+                "OCR Match %": round(conf, 1),
                 "OK Ink": int(ok_tick),
                 "NOT OK Ink": int(nok_tick),
                 "Detected State": state
             })
-            used.add(obs)
+
+        used.add(obs)
+
     return pd.DataFrame(found)
 
 
