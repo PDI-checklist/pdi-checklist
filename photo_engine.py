@@ -155,10 +155,10 @@ def detect_candidates(img, checklist_df):
             negative = 0
 
             for ln in lines:
-                xa, ya, xb, yb = ln[0]
+                coords = ln[0] if np.asarray(ln).ndim > 1 else ln
+                xa, ya, xb, yb = map(int, coords)
                 dx = xb - xa
                 dy = yb - ya
-
                 if abs(dx) < 2:
                     continue
 
