@@ -151,6 +151,15 @@ def build_report(jpc, inspector, candidates, raw_lookup, mapping):
     rows=[]; review=[]
     for i,rec in candidates.iterrows():
         obs=rec["Observation"]
+        if rec["Detected State"] != "NOT OK":
+            if rec["Detected State"] == "REVIEW":
+                review.append({
+                    "Observation": obs,
+                    "Reason": "Low tick confidence",
+                    "Detected State": rec["Detected State"],
+                    "OCR Match %": rec["OCR Match %"]
+                })
+            continue
         m=mapping.get(obs.lower())
         if m:
             dept,station,defect=m
