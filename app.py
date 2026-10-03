@@ -57,7 +57,7 @@ if submitted:
     st.dataframe(candidates,use_container_width=True,hide_index=True)
     st.info('REVIEW items are low-confidence and should be checked before export. This protects the live dashboard from false defects.')
     report,review=build_report(jpc,inspector,candidates,raw,mapping)
-        # Send Traceability Report to Google Sheet
+    # Send Traceability Report to Google Sheet
     payload_rows = []
 
     for _, r in report.iterrows():
