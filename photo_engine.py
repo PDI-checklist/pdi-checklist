@@ -137,8 +137,8 @@ def detect_candidates(img, checklist_df):
         y=line["y"]
         ok=ink_score(gray,x1+8,x2-8,y-18,y+18)
         nok=ink_score(gray,x2+8,x3-8,y-18,y+18)
-        if nok>max(80,ok*1.35): state="NOT OK"
-        elif ok>max(35,nok*1.15): state="OK"
+        if nok>45 and nok-ok>15: state="NOT OK"
+        elif ok>35 and ok-nok>15: state="OK"
         else: state="REVIEW"
         if state in ("NOT OK","REVIEW"):
             found.append({"Observation":obs,"OCR Match %":round(conf,1),"OK Ink":ok,"NOT OK Ink":nok,"Detected State":state})
