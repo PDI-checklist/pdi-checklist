@@ -137,7 +137,7 @@ def detect_candidates(img, checklist_df):
         y=line["y"]
         ok=ink_score(gray,x1+8,x2-8,y-18,y+18)
         nok=ink_score(gray,x2+8,x3-8,y-18,y+18)
-        if nok>max(35,ok*0.65): state="NOT OK"
+        if nok>max(80,ok*1.35): state="NOT OK"
         elif ok>max(35,nok*1.15): state="OK"
         else: state="REVIEW"
         if state in ("NOT OK","REVIEW"):
