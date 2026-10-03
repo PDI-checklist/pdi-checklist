@@ -135,9 +135,9 @@ def detect_candidates(img, checklist_df):
         obs=match[0]; conf=float(match[1])
         if obs in used: continue
         y=line["y"]
-                        # Improved colour-independent handwritten tick detection
-                def has_handwritten_tick(cell):
-                    if cell is None or cell.size == 0:
+        # Improved colour-independent handwritten tick detection
+        def has_handwritten_tick(cell):
+            if cell is None or cell.size == 0:
                         return False
 
                     # Add a small margin so table borders do not dominate detection
