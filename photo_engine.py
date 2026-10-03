@@ -126,8 +126,12 @@ def detect_candidates(img, checklist_df):
         x1,x2,x3=xb[:3]
     else:
         x1,x2,x3=int(img.shape[1]*.61),int(img.shape[1]*.68),int(img.shape[1]*.75)
-    found=[]
-        def has_handwritten_tick(cell):
+        
+
+    found = []
+    used = set()
+
+    def has_handwritten_tick(cell):
         if cell is None or cell.size == 0:
             return False
 
@@ -155,9 +159,9 @@ def detect_candidates(img, checklist_df):
 
         for ln in lines_h:
             coords = ln[0]
-            xa, ya, xb, yb = map(int, coords)
+            xa, ya, xb2, yb = map(int, coords)
 
-            dx = xb - xa
+            dx = xb2 - xa
             dy = yb - ya
 
             if abs(dx) < 2:
@@ -173,7 +177,6 @@ def detect_candidates(img, checklist_df):
                     negative += 1
 
         return positive >= 1 and negative >= 1
-
 
     for line in lines:
         if line["x"] > x1:
