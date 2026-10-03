@@ -168,8 +168,8 @@ def build_report(jpc, inspector, candidates, raw_lookup, mapping):
             dept=station=defect=""
             ambiguous=True
          
-         if ambiguous:
-            review.append({"Observation":obs,"Reason":"Low tick confidence" if rec["Detected State"]=="REVIEW" else "No unambiguous mapping in Observation Log","Detected State":rec["Detected State"],"OCR Match %":rec["OCR Match %"]})
-             continue
-         rows.append([len(rows)+1,jpc,meta.get("Date"),meta.get("kVA"),meta.get("Shift"),meta.get("Phase"),meta.get("Variant"),meta.get("Pole"),obs,dept,station,defect,"Close","",None,""])
+        if ambiguous:
+            review.append({"Observation":obs,"Reason":"No unambiguous mapping in Observation Log","Detected State":rec["Detected State"],"OCR Match %":rec["OCR Match %"]})
+            continue
+        rows.append([len(rows)+1,jpc,meta.get("Date"),meta.get("kVA"),meta.get("Shift"),meta.get("Phase"),meta.get("Variant"),meta.get("Pole"),obs,dept,station,defect,"Close","",None,""])
     return pd.DataFrame(rows,columns=OBS_HEADERS), pd.DataFrame(review)
