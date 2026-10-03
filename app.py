@@ -8,6 +8,7 @@ from photo_engine import load_checklist, load_mapping, load_raw_data, header_ext
 BASE=os.path.dirname(__file__)
 CHECKLIST=os.path.join(BASE,'master','Observation_Checklist.xlsx')
 DASH=os.path.join(BASE,'master','PDI_Dashboard_QC.xlsx')
+TRACEABILITY_URL="https://script.google.com/macros/s/AKfycbyy9M8-f9_Hy2vUp8xaFmE8oj1d0kwaR58mzf7S7W305hgU1xMPfyz0s6-xfnAB0qOUUQ/exec"
 
 st.set_page_config(page_title='PDI Photo Upload – Phase 2', page_icon='📋', layout='centered')
 st.title('📋 PDI Photo Upload – Phase 2')
@@ -56,6 +57,34 @@ if submitted:
     st.dataframe(candidates,use_container_width=True,hide_index=True)
     st.info('REVIEW items are low-confidence and should be checked before export. This protects the live dashboard from false defects.')
     report,review=build_report(jpc,inspector,candidates,raw,mapping)
+    # Send Traceability Report to Google Sheet
+
+
+for _, r in report.iterrows():
+    payload_rows.append({
+        "inspector_name": inspector,
+        "jpc_number": jpc,
+        "observation": r.get("Observation", ""),
+        "department": r.get("Department", ""),
+        "station": r.get("Station", ""),
+        "defect_category": r.get("Defect Category", "")
+    })
+
+try:
+    response = requests.post(
+        TRACEABILITY_URL,
+        json={
+            "token": "PDI2026_SECURE",
+            "rows": payload_rows
+        },
+        timeout=20
+    )
+
+    result = response.json()
+
+    if result.get("success"):
+        st.success(
+            f"✅ Google Sheet updated — {result.get('rows_added', 0)} row(s) 
     st.subheader('Traceability Report')
     st.dataframe(report,use_container_width=True,hide_index=True)
     if not review.empty:
