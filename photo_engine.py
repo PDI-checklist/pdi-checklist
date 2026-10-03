@@ -132,55 +132,107 @@ def detect_candidates(img, checklist_df):
     used = set()
 
     def has_handwritten_tick(cell):
-        if cell is None or cell.size == 0:
-            return False
+    if cell is None or cell.size == 0:
+        return False
 
-        h, w = cell.shape[:2]
+    h, w = cell.shape[:2]
 
-        if h > 6 and w > 6:
-            cell = cell[3:h-3, 3:w-3]
+    if h < 10 or w < 10:
+        return False
 
-        edges = cv2.Canny(cell, 40, 120)
+    cell = cell[4:h-4, 4:w-4]
 
-        lines_h = cv2.HoughLinesP(
-            edges,
-            1,
-            np.pi / 180,
-            threshold=4,
-            minLineLength=3,
-            maxLineGap=5
-        )
+    gray_cell = cell
 
-        if lines_h is None:
-            return False
+    if len(gray_cell.shape) == 3:
+        gray_cell = cv2.cvtColor(gray_cell, cv2.COLOR_BGR2GRAY)
 
-        positive = 0
-        negative = 0
+    bw = cv2.threshold(
+        gray_cell,
+        0,
+        255,
+        cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+    )[1]
 
-        for ln in lines_h:
-            coords = np.asarray(ln).reshape(-1)[:4]
-            xa, ya, xb2, yb = map(int, coords)
+    # Remove long horizontal/vertical table lines
+    horizontal_kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (max(3, w // 3), 1)
+    )
 
-            dx = xb2 - xa
-            dy = yb - ya
+    vertical_kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (1, max(3, h // 2))
+    )
 
-            if abs(dx) < 2:
-                continue
+    horizontal = cv2.morphologyEx(
+        bw,
+        cv2.MORPH_OPEN,
+        horizontal_kernel
+    )
 
-            length = (dx * dx + dy * dy) ** 0.5
-            slope = dy / dx
+    vertical = cv2.morphologyEx(
+        bw,
+        cv2.MORPH_OPEN,
+        vertical_kernel
+    )
 
-            if 3 <= length <= 35 and 0.20 <= abs(slope) <= 5:
-                if slope > 0:
-                    positive += 1
-                else:
-                    negative += 1
+    cleaned = cv2.subtract(
+        bw,
+        horizontal
+    )
 
-        return positive >= 1 and negative >= 1
+    cleaned = cv2.subtract(
+        cleaned,
+        vertical
+    )
 
-    for line in lines:
-        if line["x"] > x1:
+    edges = cv2.Canny(
+        cleaned,
+        50,
+        150
+    )
+
+    lines_h = cv2.HoughLinesP(
+        edges,
+        1,
+        np.pi / 180,
+        threshold=5,
+        minLineLength=4,
+        maxLineGap=4
+    )
+
+    if lines_h is None:
+        return False
+
+    positive = 0
+    negative = 0
+
+    for ln in lines_h:
+        coords = np.asarray(ln).reshape(-1)[:4]
+
+        xa, ya, xb, yb = map(int, coords)
+
+        dx = xb - xa
+        dy = yb - ya
+
+        if abs(dx) < 2:
             continue
+
+        length = (dx * dx + dy * dy) ** 0.5
+        slope = dy / dx
+
+        if 4 <= length <= 30 and 0.35 <= abs(slope) <= 4:
+            if slope > 0:
+                positive += 1
+            else:
+                negative += 1
+
+    return positive >= 1 and negative >= 1
+
+        for line in lines:
+            if line["x"] > x1:
+               continue
 
         match = process.extractOne(
             line["text"],
