@@ -135,43 +135,56 @@ def detect_candidates(img, checklist_df):
         obs=match[0]; conf=float(match[1])
         if obs in used: continue
         y=line["y"]
-        # Colour-independent handwritten tick detection
-        def has_handwritten_tick(cell):
-            edges = cv2.Canny(cell, 50, 150)
+                        # Improved colour-independent handwritten tick detection
+                def has_handwritten_tick(cell):
+                    if cell is None or cell.size == 0:
+                        return False
 
-            lines = cv2.HoughLinesP(
-                edges,
-                1,
-                np.pi / 180,
-                threshold=8,
-                minLineLength=4,
-                maxLineGap=3
-            )
+                    # Add a small margin so table borders do not dominate detection
+                    h, w = cell.shape[:2]
+                    if h > 6 and w > 6:
+                        cell = cell[3:h-3, 3:w-3]
 
-            if lines is None:
-                return False
+                    # Edge detection
+                    edges = cv2.Canny(cell, 40, 120)
 
-            positive = 0
-            negative = 0
+                    # Detect short diagonal strokes that form a handwritten check mark
+                    lines_h = cv2.HoughLinesP(
+                        edges,
+                        1,
+                        np.pi / 180,
+                        threshold=4,
+                        minLineLength=3,
+                        maxLineGap=5
+                    )
 
-            for ln in lines:
-                coords = ln[0] if np.asarray(ln).ndim > 1 else ln
-                xa, ya, xb, yb = map(int, coords)
-                dx = xb - xa
-                dy = yb - ya
-                if abs(dx) < 2:
-                    continue
+                    if lines_h is None:
+                        return False
 
-                slope = dy / dx
-                length = (dx * dx + dy * dy) ** 0.5
+                    positive = 0
+                    negative = 0
 
-                if 4 <= length <= 30 and 0.25 <= abs(slope) <= 4:
-                    if slope > 0:
-                        positive += 1
-                    else:
-                        negative += 1
+                    for ln in lines_h:
+                        coords = ln[0] if np.asarray(ln).ndim > 1 else ln
+                        xa, ya, xb, yb = map(int, coords)
 
-            return positive >= 1 and negative >= 1
+                        dx = xb - xa
+                        dy = yb - ya
+
+                        if abs(dx) < 2:
+                            continue
+
+                        length = (dx * dx + dy * dy) ** 0.5
+                        slope = dy / dx
+
+                        if 3 <= length <= 35 and 0.20 <= abs(slope) <= 5:
+                            if slope > 0:
+                                positive += 1
+                            else:
+                                negative += 1
+
+                    # A handwritten tick normally contains two opposite diagonal strokes
+                    return positive >= 1 and negative >= 1
 
         ok_cell = gray[y-18:y+18, x1+8:x2-8]
         nok_cell = gray[y-18:y+18, x2+8:x3-8]
