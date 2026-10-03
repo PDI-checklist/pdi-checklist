@@ -128,69 +128,76 @@ def detect_candidates(img, checklist_df):
         x1,x2,x3=int(img.shape[1]*.61),int(img.shape[1]*.68),int(img.shape[1]*.75)
     found=[]
     used=set()
-    for line in lines:
-        if line["x"]>x1: continue
-        match=process.extractOne(line["text"],choices,scorer=fuzz.token_set_ratio)
-        if not match or match[1]<62: continue
-        obs=match[0]; conf=float(match[1])
-        if obs in used: continue
-        y=line["y"]
-        # Improved colour-independent handwritten tick detection
         def has_handwritten_tick(cell):
-            if cell is None or cell.size == 0:
-                        return False
+        if cell is None or cell.size == 0:
+            return False
 
-                    # Add a small margin so table borders do not dominate detection
-                    h, w = cell.shape[:2]
-                    if h > 6 and w > 6:
-                        cell = cell[3:h-3, 3:w-3]
+        h, w = cell.shape[:2]
 
-                    # Edge detection
-                    edges = cv2.Canny(cell, 40, 120)
+        if h > 6 and w > 6:
+            cell = cell[3:h-3, 3:w-3]
 
-                    # Detect short diagonal strokes that form a handwritten check mark
-                    lines_h = cv2.HoughLinesP(
-                        edges,
-                        1,
-                        np.pi / 180,
-                        threshold=4,
-                        minLineLength=3,
-                        maxLineGap=5
-                    )
+        edges = cv2.Canny(cell, 40, 120)
 
-                    if lines_h is None:
-                        return False
+        lines_h = cv2.HoughLinesP(
+            edges,
+            1,
+            np.pi / 180,
+            threshold=4,
+            minLineLength=3,
+            maxLineGap=5
+        )
 
-                    positive = 0
-                    negative = 0
+        if lines_h is None:
+            return False
 
-                    for ln in lines_h:
-                        coords = ln[0] if np.asarray(ln).ndim > 1 else ln
-                        xa, ya, xb, yb = map(int, coords)
+        positive = 0
+        negative = 0
 
-                        dx = xb - xa
-                        dy = yb - ya
+        for ln in lines_h:
+            coords = ln[0] if np.asarray(ln).ndim > 1 else ln
+            xa, ya, xb, yb = map(int, coords)
 
-                        if abs(dx) < 2:
-                            continue
+            dx = xb - xa
+            dy = yb - ya
 
-                        length = (dx * dx + dy * dy) ** 0.5
-                        slope = dy / dx
+            if abs(dx) < 2:
+                continue
 
-                        if 3 <= length <= 35 and 0.20 <= abs(slope) <= 5:
-                            if slope > 0:
-                                positive += 1
-                            else:
-                                negative += 1
+            length = (dx * dx + dy * dy) ** 0.5
+            slope = dy / dx
 
-                    # A handwritten tick normally contains two opposite diagonal strokes
-                    return positive >= 1 and negative >= 1
+            if 3 <= length <= 35 and 0.20 <= abs(slope) <= 5:
+                if slope > 0:
+                    positive += 1
+                else:
+                    negative += 1
+
+        return positive >= 1 and negative >= 1
+
+    for line in lines:
+        if line["x"] > x1:
+            continue
+
+        match = process.extractOne(line["text"], choices)
+
+        if not match or match[1] < 62:
+            continue
+
+        obs = match[0]
+        conf = float(match[1])
+
+        if obs in used:
+            continue
+
+        y = line["y"]
+        
 
         ok_cell = gray[y-18:y+18, x1+8:x2-8]
         nok_cell = gray[y-18:y+18, x2+8:x3-8]
 
         ok_tick = has_handwritten_tick(ok_cell)
-        nok_tick = has_handwritten_tick(nok_cell)
+        nok_tick = has_handwritten_tiick(nok_cell)
 
         if nok_tick and not ok_tick:
             state = "NOT OK"
