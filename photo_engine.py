@@ -135,13 +135,65 @@ def detect_candidates(img, checklist_df):
         obs=match[0]; conf=float(match[1])
         if obs in used: continue
         y=line["y"]
-        ok=ink_score(gray,x1+8,x2-8,y-18,y+18)
-        nok=ink_score(gray,x2+8,x3-8,y-18,y+18)
-        if nok>45 and nok-ok>15: state="NOT OK"
-        elif ok>35 and ok-nok>15: state="OK"
-        else: state="REVIEW"
-        if state in ("NOT OK","REVIEW"):
-            found.append({"Observation":obs,"OCR Match %":round(conf,1),"OK Ink":ok,"NOT OK Ink":nok,"Detected State":state})
+        # Colour-independent handwritten tick detection
+        def has_handwritten_tick(cell):
+            edges = cv2.Canny(cell, 50, 150)
+
+            lines = cv2.HoughLinesP(
+                edges,
+                1,
+                np.pi / 180,
+                threshold=8,
+                minLineLength=4,
+                maxLineGap=3
+            )
+
+            if lines is None:
+                return False
+
+            positive = 0
+            negative = 0
+
+            for ln in lines:
+                xa, ya, xb, yb = ln[0]
+                dx = xb - xa
+                dy = yb - ya
+
+                if abs(dx) < 2:
+                    continue
+
+                slope = dy / dx
+                length = (dx * dx + dy * dy) ** 0.5
+
+                if 4 <= length <= 30 and 0.25 <= abs(slope) <= 4:
+                    if slope > 0:
+                        positive += 1
+                    else:
+                        negative += 1
+
+            return positive >= 1 and negative >= 1
+
+        ok_cell = gray[y-18:y+18, x1+8:x2-8]
+        nok_cell = gray[y-18:y+18, x2+8:x3-8]
+
+        ok_tick = has_handwritten_tick(ok_cell)
+        nok_tick = has_handwritten_tick(nok_cell)
+
+        if nok_tick and not ok_tick:
+            state = "NOT OK"
+        elif ok_tick and not nok_tick:
+            state = "OK"
+        else:
+            state = "REVIEW"
+
+        if state in ("NOT OK", "REVIEW"):
+            found.append({
+                "Observation": obs,
+                "OCR Match %": round(conf,1),
+                "OK Ink": int(ok_tick),
+                "NOT OK Ink": int(nok_tick),
+                "Detected State": state
+            })
             used.add(obs)
     return pd.DataFrame(found)
 
