@@ -60,42 +60,9 @@ if submitted:
     # Send Traceability Report to Google Sheet
 
 
-for _, r in report.iterrows():
-    payload_rows.append({
-        "inspector_name": inspector,
-        "jpc_number": jpc,
-        "observation": r.get("Observation", ""),
-        "department": r.get("Department", ""),
-        "station": r.get("Station", ""),
-        "defect_category": r.get("Defect Category", "")
-    })
 
-try:
-    response = requests.post(
-        TRACEABILITY_URL,
-        json={
-            "token": "PDI2026_SECURE",
-            "rows": payload_rows
-        },
-        timeout=20
-    )
 
-    result = response.json()
 
-    if result.get("success"):
-        st.success(
-            f"✅ Google Sheet updated — {result.get('rows_added', 0)} row(s) 
-    st.subheader('Traceability Report')
-    st.dataframe(report,use_container_width=True,hide_index=True)
-    if not review.empty:
-        st.subheader('Review Queue')
-        st.dataframe(review,use_container_width=True,hide_index=True)
-    # create xlsx in memory
-    import openpyxl
-    from openpyxl.styles import Font, PatternFill, Alignment
-    wb=openpyxl.Workbook(); ws=wb.active; ws.title='Traceability Report'
-    for c,h in enumerate(report.columns,1): ws.cell(1,c,h)
-    for r,row in enumerate(report.itertuples(index=False),2):
         for c,val in enumerate(row,1): ws.cell(r,c,val)
     for cell in ws[1]: cell.font=Font(bold=True); cell.alignment=Alignment(horizontal='center')
     ws.freeze_panes='A2'; ws.auto_filter.ref=ws.dimensions
