@@ -58,11 +58,6 @@ if submitted:
     st.info('REVIEW items are low-confidence and should be checked before export. This protects the live dashboard from false defects.')
     report,review=build_report(jpc,inspector,candidates,raw,mapping)
     # Send Traceability Report to Google Sheet
-        for c,val in enumerate(row,1): ws.cell(r,c,val)
-    for cell in ws[1]: cell.font=Font(bold=True); cell.alignment=Alignment(horizontal='center')
-    ws.freeze_panes='A2'; ws.auto_filter.ref=ws.dimensions
-    for col in ws.columns:
-        letter=col[0].column_letter; ws.column_dimensions[letter].width=min(max(max(len(str(x.value or '')) for x in col)+2,10),40)
     bio=io.BytesIO(); wb.save(bio); bio.seek(0)
     st.download_button('⬇️ Download Traceability Report Excel',bio,'PDI_Automated_Traceability_Report_Phase2.xlsx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     st.caption(f'Inspector: {inspector} | JPC: {jpc} | Photos: {len(photos)} | Candidates: {len(report)}')
