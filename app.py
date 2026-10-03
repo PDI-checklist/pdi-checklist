@@ -58,6 +58,41 @@ if submitted:
     st.info('REVIEW items are low-confidence and should be checked before export. This protects the live dashboard from false defects.')
     report,review=build_report(jpc,inspector,candidates,raw,mapping)
     # Send Traceability Report to Google Sheet
+    payload_rows = []
+
+for _, r in report.iterrows():
+    payload_rows.append({
+        "inspector_name": inspector,
+        "jpc_number": jpc,
+        "observation": r.get("Observation", ""),
+        "department": r.get("Department", ""),
+        "station": r.get("Station", ""),
+        "defect_category": r.get("Defect Category", "")
+    })
+
+try:
+    response = requests.post(
+        TRACEABILITY_URL,
+        json={
+            "token": "PDI2026_SECURE",
+            "rows": payload_rows
+        },
+        timeout=20
+    )
+
+    result = response.json()
+
+    if result.get("success"):
+        st.success(
+            f"✅ Google Sheet updated — {result.get('rows_added', 0)} row(s) added."
+        )
+    else:
+        st.warning(
+            f"⚠️ Google Sheet update failed: {result.get('error', 'Unknown error')}"
+        )
+
+except Exception as e:
+    st.warning(f"⚠️ Google Sheet connection error: {e}")
     bio=io.BytesIO(); wb.save(bio); bio.seek(0)
     st.download_button('⬇️ Download Traceability Report Excel',bio,'PDI_Automated_Traceability_Report_Phase2.xlsx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     st.caption(f'Inspector: {inspector} | JPC: {jpc} | Photos: {len(photos)} | Candidates: {len(report)}')
