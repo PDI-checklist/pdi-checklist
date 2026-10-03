@@ -158,7 +158,7 @@ def detect_candidates(img, checklist_df):
         negative = 0
 
         for ln in lines_h:
-            coords = ln[0]
+            coords = np.asarray(ln).reshape(-1)[:4]
             xa, ya, xb2, yb = map(int, coords)
 
             dx = xb2 - xa
