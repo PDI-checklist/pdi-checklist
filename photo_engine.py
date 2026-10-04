@@ -126,155 +126,23 @@ def detect_candidates(img, checklist_df):
         x1,x2,x3=xb[:3]
     else:
         x1,x2,x3=int(img.shape[1]*.61),int(img.shape[1]*.68),int(img.shape[1]*.75)
-        
-
-    found = []
-    used = set()
-
-    def has_handwritten_tick(cell):
-    if cell is None or cell.size == 0:
-        return False
-
-    h, w = cell.shape[:2]
-
-    if h < 10 or w < 10:
-        return False
-
-    cell = cell[4:h-4, 4:w-4]
-
-    gray_cell = cell
-
-    if len(gray_cell.shape) == 3:
-        gray_cell = cv2.cvtColor(gray_cell, cv2.COLOR_BGR2GRAY)
-
-    bw = cv2.threshold(
-        gray_cell,
-        0,
-        255,
-        cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
-    )[1]
-
-    # Remove long horizontal/vertical table lines
-    horizontal_kernel = cv2.getStructuringElement(
-        cv2.MORPH_RECT,
-        (max(3, w // 3), 1)
-    )
-
-    vertical_kernel = cv2.getStructuringElement(
-        cv2.MORPH_RECT,
-        (1, max(3, h // 2))
-    )
-
-    horizontal = cv2.morphologyEx(
-        bw,
-        cv2.MORPH_OPEN,
-        horizontal_kernel
-    )
-
-    vertical = cv2.morphologyEx(
-        bw,
-        cv2.MORPH_OPEN,
-        vertical_kernel
-    )
-
-    cleaned = cv2.subtract(
-        bw,
-        horizontal
-    )
-
-    cleaned = cv2.subtract(
-        cleaned,
-        vertical
-    )
-
-    edges = cv2.Canny(
-        cleaned,
-        50,
-        150
-    )
-
-    lines_h = cv2.HoughLinesP(
-        edges,
-        1,
-        np.pi / 180,
-        threshold=5,
-        minLineLength=4,
-        maxLineGap=4
-    )
-
-    if lines_h is None:
-        return False
-
-    positive = 0
-    negative = 0
-
-    for ln in lines_h:
-        coords = np.asarray(ln).reshape(-1)[:4]
-
-        xa, ya, xb, yb = map(int, coords)
-
-        dx = xb - xa
-        dy = yb - ya
-
-        if abs(dx) < 2:
-            continue
-
-        length = (dx * dx + dy * dy) ** 0.5
-        slope = dy / dx
-
-        if 4 <= length <= 30 and 0.35 <= abs(slope) <= 4:
-            if slope > 0:
-                positive += 1
-            else:
-                negative += 1
-
-    return positive >= 1 and negative >= 1
-
-        for line in lines:
-            if line["x"] > x1:
-               continue
-
-        match = process.extractOne(
-            line["text"],
-            choices,
-            scorer=fuzz.token_set_ratio
-        )
-
-        if not match or match[1] < 62:
-            continue
-
-        obs = match[0]
-        conf = float(match[1])
-
-        if obs in used:
-            continue
-
-        y = line["y"]
-
-        ok_cell = gray[y-18:y+18, x1+8:x2-8]
-        nok_cell = gray[y-18:y+18, x2+8:x3-8]
-
-        ok_tick = has_handwritten_tick(ok_cell)
-        nok_tick = has_handwritten_tick(nok_cell)
-
-        if nok_tick and not ok_tick:
-            state = "NOT OK"
-        elif ok_tick and not nok_tick:
-            state = "OK"
-        else:
-            state = "REVIEW"
-
-        if state in ("NOT OK", "REVIEW"):
-            found.append({
-                "Observation": obs,
-                "OCR Match %": round(conf, 1),
-                "OK Ink": int(ok_tick),
-                "NOT OK Ink": int(nok_tick),
-                "Detected State": state
-            })
-
-        used.add(obs)
-
+    found=[]
+    used=set()
+    for line in lines:
+        if line["x"]>x1: continue
+        match=process.extractOne(line["text"],choices,scorer=fuzz.token_set_ratio)
+        if not match or match[1]<62: continue
+        obs=match[0]; conf=float(match[1])
+        if obs in used: continue
+        y=line["y"]
+        ok=ink_score(gray,x1+8,x2-8,y-18,y+18)
+        nok=ink_score(gray,x2+8,x3-8,y-18,y+18)
+        if nok>max(35,ok*0.65): state="NOT OK"
+        elif ok>max(35,nok*1.15): state="OK"
+        else: state="REVIEW"
+        if state in ("NOT OK","REVIEW"):
+            found.append({"Observation":obs,"OCR Match %":round(conf,1),"OK Ink":ok,"NOT OK Ink":nok,"Detected State":state})
+            used.add(obs)
     return pd.DataFrame(found)
 
 
@@ -283,15 +151,6 @@ def build_report(jpc, inspector, candidates, raw_lookup, mapping):
     rows=[]; review=[]
     for i,rec in candidates.iterrows():
         obs=rec["Observation"]
-        if rec["Detected State"] != "NOT OK":
-            if rec["Detected State"] == "REVIEW":
-                review.append({
-                    "Observation": obs,
-                    "Reason": "Low tick confidence",
-                    "Detected State": rec["Detected State"],
-                    "OCR Match %": rec["OCR Match %"]
-                })
-            continue
         m=mapping.get(obs.lower())
         if m:
             dept,station,defect=m
@@ -299,9 +158,7 @@ def build_report(jpc, inspector, candidates, raw_lookup, mapping):
         else:
             dept=station=defect=""
             ambiguous=True
-         
-        if ambiguous:
-            review.append({"Observation":obs,"Reason":"No unambiguous mapping in Observation Log","Detected State":rec["Detected State"],"OCR Match %":rec["OCR Match %"]})
-            continue
+        if rec["Detected State"]=="REVIEW" or ambiguous:
+            review.append({"Observation":obs,"Reason":"Low tick confidence" if rec["Detected State"]=="REVIEW" else "No unambiguous mapping in Observation Log","Detected State":rec["Detected State"],"OCR Match %":rec["OCR Match %"]})
         rows.append([len(rows)+1,jpc,meta.get("Date"),meta.get("kVA"),meta.get("Shift"),meta.get("Phase"),meta.get("Variant"),meta.get("Pole"),obs,dept,station,defect,"Close","",None,""])
     return pd.DataFrame(rows,columns=OBS_HEADERS), pd.DataFrame(review)

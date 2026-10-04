@@ -1,147 +1,133 @@
-import os, io
-import streamlit as st
-import requests
+"""Streamlit UI for the JPC-gated dynamic checklist upload pipeline."""
+from __future__ import annotations
+
+import io
+import os
+
 import pandas as pd
+import streamlit as st
 from openpyxl import Workbook
-from photo_engine import load_checklist, load_mapping, load_raw_data, header_extract, detect_candidates, build_report
+from openpyxl.styles import Alignment, Font
 
-BASE=os.path.dirname(__file__)
-CHECKLIST=os.path.join(BASE,'master','Observation_Checklist.xlsx')
-DASH=os.path.join(BASE,'master','PDI_Dashboard_QC.xlsx')
-TRACEABILITY_URL="https://script.google.com/macros/s/AKfycbyy9M8-f9_Hy2vUp8xaFmE8oj1d0kwaR58mzf7S7W305hgU1xMPfyz0s6-xfnAB0qOUUQ/exec"
+from app_pipeline import process_upload_batch
+from central_config import build_central_adapter
+from central_write_adapter import WriteStatus
+from photo_engine import build_report, load_mapping, load_raw_data
 
-st.set_page_config(page_title='PDI Photo Upload – Phase 2', page_icon='📋', layout='centered')
-st.title('📋 PDI Photo Upload – Phase 2')
-st.caption('Paper checklist → Photo Upload → NOT OK detection → Traceability Report')
+
+BASE = os.path.dirname(__file__)
+DASH = os.path.join(BASE, "master", "PDI_Dashboard_QC.xlsx")
+try:
+    _streamlit_secrets = st.secrets
+except Exception:
+    _streamlit_secrets = {}
+CENTRAL_ADAPTER = build_central_adapter(_streamlit_secrets)
+
 
 @st.cache_data
+def load_report_data():
+    mapping, conflicts = load_mapping(DASH) if os.path.exists(DASH) else ({}, {})
+    raw = load_raw_data(DASH) if os.path.exists(DASH) else {}
+    return mapping, conflicts, raw
 
-def load_data():
-    checklist=load_checklist(CHECKLIST)
-    mapping, conflicts=load_mapping(DASH) if os.path.exists(DASH) else ({}, {})
-    raw=load_raw_data(DASH) if os.path.exists(DASH) else {}
-    return checklist,mapping,conflicts,raw
 
-checklist,mapping,conflicts,raw=load_data()
+def _excel_bytes(report: pd.DataFrame) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Traceability Report"
+    for column, heading in enumerate(report.columns, 1):
+        sheet.cell(1, column, heading)
+    for row_number, row in enumerate(report.itertuples(index=False), 2):
+        for column, value in enumerate(row, 1):
+            sheet.cell(row_number, column, value)
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal="center")
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = sheet.dimensions
+    for column in sheet.columns:
+        letter = column[0].column_letter
+        sheet.column_dimensions[letter].width = min(
+            max(max(len(str(cell.value or "")) for cell in column) + 2, 10), 40)
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
 
-with st.form('upload'):
-    inspector=st.text_input('Inspector Name *', placeholder='e.g. Harish')
-    jpc_manual=st.text_input('JPC Number (optional – only if OCR cannot read it)', placeholder='e.g. VS-3009')
-    photos=st.file_uploader('Upload checklist photos (all pages)', type=['jpg','jpeg','png'], accept_multiple_files=True)
-    submitted=st.form_submit_button('Process Checklist')
+
+st.set_page_config(page_title="PDI Photo Upload – Phase 2", page_icon="📋", layout="centered")
+st.title("📋 PDI Photo Upload – Phase 2")
+st.caption("JPC validation → Dynamic row/tick detection → Observation text → Batch submission")
+
+mapping, conflicts, raw = load_report_data()
+
+with st.form("upload"):
+    inspector = st.text_input("Inspector Name *", placeholder="e.g. Harish")
+    entered_jpc = st.text_input("JPC Number *", placeholder="e.g. VH-3009")
+    photos = st.file_uploader("Upload checklist photos (all pages) *",
+                              type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+    submitted = st.form_submit_button("Process Checklist")
 
 if submitted:
-    if not inspector.strip(): st.error('Inspector Name is required.'); st.stop()
-    if not photos: st.error('Please upload at least one checklist photo.'); st.stop()
-    all_candidates=[]; headers=[]
-    for f in photos:
-        data=f.read()
-        import cv2, numpy as np
-        img=cv2.imdecode(np.frombuffer(data,np.uint8),cv2.IMREAD_COLOR)
-        if img is None: continue
-        headers.append(header_extract(img))
-        c=detect_candidates(img,checklist)
-        if not c.empty: all_candidates.append(c)
-    jpcs=[h['jpc'] for h in headers if h.get('jpc')]
-    jpc=(jpcs[0] if jpcs else jpc_manual.strip().upper())
-    if not jpc:
-        st.warning('JPC Number could not be read automatically. Enter it above and re-submit.')
+    if not inspector.strip():
+        st.error("Inspector Name is required.")
         st.stop()
-    candidates=pd.concat(all_candidates,ignore_index=True) if all_candidates else pd.DataFrame(columns=['Observation','OCR Match %','OK Ink','NOT OK Ink','Detected State'])
-    if candidates.empty:
-        st.success('No NOT OK candidates detected. If every point is genuinely OK, no Observation Log row is created.')
+    if not entered_jpc.strip():
+        st.error("JPC Number is required.")
         st.stop()
-    # Deduplicate repeated OCR hits from overlapping page areas
-    candidates=candidates.sort_values(['Observation','Detected State']).drop_duplicates('Observation',keep='first').reset_index(drop=True)
-    st.subheader('AI/CV detection review')
-    st.dataframe(candidates,use_container_width=True,hide_index=True)
-    st.info('REVIEW items are low-confidence and should be checked before export. This protects the live dashboard from false defects.')
-    report,review=build_report(jpc,inspector,candidates,raw,mapping)
-    # Send Traceability Report to Google Sheet
-    payload_rows = []
+    if not photos:
+        st.error("Upload at least one checklist photo.")
+        st.stop()
 
-    for _, r in report.iterrows():
-        payload_rows.append({
-            "inspector_name": inspector,
-            "jpc_number": jpc,
-            "observation": r.get("Observation", ""),
-            "department": r.get("Department", ""),
-            "station": r.get("Station", ""),
-            "defect_category": r.get("Defect Category", "")
-        })
+    photo_payloads = [{"filename": photo.name, "data": photo.getvalue()} for photo in photos]
+    result = process_upload_batch(inspector, entered_jpc, photo_payloads,
+                                  central_adapter=CENTRAL_ADAPTER)
+    st.subheader("Per-photo JPC validation")
+    jpc_rows = [{"Photo": check.filename, "Status": check.status,
+                 "Candidates": ", ".join(check.candidates), "Reason": check.reason}
+                for check in result.photo_jpc_results]
+    if jpc_rows:
+        st.dataframe(pd.DataFrame(jpc_rows), use_container_width=True, hide_index=True)
+    if result.status == "JPC_REJECTED":
+        st.error(result.message)
+        st.stop()
 
-    try:
-        response = requests.post(
-            TRACEABILITY_URL,
-            json={
-                "token": "PDI2026_SECURE",
-                "rows": payload_rows
-            },
-            timeout=20
-        )
+    if result.status == "NO_OBSERVATIONS":
+        st.info(result.message)
+        st.stop()
+    if result.status == "REJECTED":
+        st.error(result.message)
+        st.stop()
 
-        result = response.json()
-
-        if result.get("success"):
-            st.success(
-                f"✅ Google Sheet updated — {result.get('rows_added', 0)} row(s) added."
-            )
-        else:
-            st.warning(
-                f"⚠️ Google Sheet update failed: {result.get('error', 'Unknown error')}"
-            )
-
-    except Exception as e:
-        st.warning(f"⚠️ Google Sheet connection error: {e}")
-
-    st.subheader("Traceability Report")
-    st.dataframe(
-        report,
-        use_container_width=True,
-        hide_index=True
-    )
-
+    st.subheader("Confirmed NOT OK observations")
+    st.dataframe(pd.DataFrame(result.observations), use_container_width=True, hide_index=True)
+    report_candidates = pd.DataFrame([
+        {"Observation": record["Observation"],
+         "OCR Match %": round(float(record["OCR Confidence"]) * 100, 1),
+         "OK Ink": 0, "NOT OK Ink": 0, "Detected State": "NOT OK"}
+        for record in result.observations
+    ])
+    report, review = build_report(result.jpc, inspector, report_candidates, raw, mapping)
+    st.subheader("Traceability Report Preview")
+    st.dataframe(report, use_container_width=True, hide_index=True)
     if not review.empty:
         st.subheader("Review Queue")
-        st.dataframe(
-            review,
-            use_container_width=True,
-            hide_index=True
-        )
+        st.dataframe(review, use_container_width=True, hide_index=True)
 
-    # Create XLSX in memory
-    from openpyxl.styles import Font
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Traceability Report"
-
-    for c, h in enumerate(report.columns, 1):
-        ws.cell(1, c, h)
-
-    for r, row in enumerate(report.itertuples(index=False), 2):
-        for c, val in enumerate(row, 1):
-            ws.cell(r, c, val)
-
-    for cell in ws[1]:
-        cell.font = Font(bold=True)
-
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = ws.dimensions
-
-    for col in ws.columns:
-        letter = col[0].column_letter
-        ws.column_dimensions[letter].width = 25
-
-    bio = io.BytesIO()
-    wb.save(bio)
-    bio.seek(0)
-
-    st.download_button(
-        "⬇️ Download Traceability Report",
-        data=bio,
-        file_name=f"PDI_Traceability_{jpc}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-
-    st.caption(f"Inspector: {inspector} | JPC: {jpc}")
+    if result.status == WriteStatus.SUCCESS.value:
+        st.success(f"Central write confirmed: {result.write_result.records_written} record(s).")
+        st.download_button("⬇️ Download Traceability Report Excel", _excel_bytes(report),
+                           "PDI_Automated_Traceability_Report_Phase2.xlsx",
+                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    elif result.status == WriteStatus.DUPLICATE.value:
+        st.info(f"Central system reports this JPC batch as a duplicate: {result.message}")
+    else:
+        st.error(f"Central write not confirmed ({result.status}): {result.message}")
+        st.caption("The report above is a local preview only; no central-write success is claimed.")
+        st.download_button("⬇️ Download local report preview (not submitted)", _excel_bytes(report),
+                           "PDI_Automated_Traceability_Report_Phase2.xlsx",
+                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.caption(f"Inspector: {inspector} | JPC: {result.jpc} | Photos: {len(photos)} | "
+               f"Observations: {len(result.observations)}")
+    if result.timings_ms:
+        st.caption("Processing times (ms): " + ", ".join(
+            f"{name}={value:.1f}" for name, value in result.timings_ms.items()))
