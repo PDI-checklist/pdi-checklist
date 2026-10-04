@@ -37,6 +37,7 @@ _BUSINESS_JPC = re.compile(r"^(?=.*[A-Z])(?=.*\d)[A-Z0-9]{3,32}$")
 _ALLOWED_RECORD_FIELDS = {
     "JPC Number", "Inspector Name", "Observation", "OCR Status",
     "OCR Confidence", "Source Photo", "Source Row", "Source Photos", "Source Rows",
+    "Department", "Station", "Defect Category", "Status", "Cleared by", "Closure date", "Closure Remarks",
 }
 
 

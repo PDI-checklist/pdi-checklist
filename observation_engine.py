@@ -333,6 +333,112 @@ def _preprocessing_candidates(region: np.ndarray,
     ]
 
 
+
+def _targeted_row_band_candidate(gray: np.ndarray, x1: int, y1: int, x2: int, y2: int) -> dict[str, Any] | None:
+    """Read the target row's text line from a small vertically padded band.
+
+    Mobile photos often have row heights near 20-30 px. A crop that is exactly
+    one detected row can clip glyph ascenders/descenders, while a larger crop
+    can include the neighboring row. This helper OCRs a small padded band and
+    keeps the token group whose baseline lies in the target row. It is purely
+    image-grounded and does not compare against a master observation list.
+    """
+    try:
+        import pytesseract
+        row_height = max(1, y2 - y1)
+        pad = max(4, round(row_height * 0.28))
+        top = max(0, y1 - pad)
+        bottom = min(gray.shape[0], y2 + pad)
+        crop = gray[top:bottom, max(0, x1):min(gray.shape[1], x2)]
+        if crop.size == 0:
+            return None
+        scale = 10.0
+        enlarged = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        row_center = (y1 + y2) / 2.0
+        candidates: list[dict[str, Any]] = []
+        for psm in (6, 11, 12):
+            data = pytesseract.image_to_data(
+                enlarged,
+                config=f"--psm {psm} -c preserve_interword_spaces=1",
+                output_type=pytesseract.Output.DICT,
+            )
+            tokens: list[dict[str, Any]] = []
+            for text, conf, left, tok_top, width, height in zip(
+                data.get("text", []), data.get("conf", []), data.get("left", []),
+                data.get("top", []), data.get("width", []), data.get("height", [])
+            ):
+                text = str(text).strip()
+                if not text:
+                    continue
+                try:
+                    confidence = float(conf)
+                except (TypeError, ValueError):
+                    confidence = 0.0
+                center_y = top + (float(tok_top) + float(height) / 2.0) / scale
+                tokens.append({
+                    "text": text,
+                    "confidence": confidence,
+                    "left": float(left),
+                    "center_y": center_y,
+                })
+            if not tokens:
+                continue
+            # Cluster OCR tokens into text lines by their image y-position.
+            groups: list[list[dict[str, Any]]] = []
+            for token in sorted(tokens, key=lambda item: item["center_y"]):
+                if not groups:
+                    groups.append([token])
+                    continue
+                group_y = sum(item["center_y"] for item in groups[-1]) / len(groups[-1])
+                if abs(token["center_y"] - group_y) <= 3.5:
+                    groups[-1].append(token)
+                else:
+                    groups.append([token])
+            for group in groups:
+                center_y = sum(item["center_y"] for item in group) / len(group)
+                if center_y < row_center - 1.0 or center_y > y2 + pad * 0.65:
+                    continue
+                cleaned_tokens = []
+                for item in sorted(group, key=lambda value: value["left"]):
+                    word = re.sub(r"^[^\w]+|[^\w\-/().,&%+:]+$", "", item["text"])
+                    if not word:
+                        continue
+                    # Drop common border/noise fragments while preserving low-
+                    # confidence longer words that may be genuine print text.
+                    if len(word) <= 2 and item["confidence"] < 80:
+                        continue
+                    if len(word) <= 3 and item["confidence"] < 35:
+                        continue
+                    if len(set(word.casefold())) == 1 and len(word) >= 3:
+                        continue
+                    cleaned_tokens.append((word, item["confidence"]))
+                if not cleaned_tokens:
+                    continue
+                text = _clean_text([word for word, _ in cleaned_tokens])
+                if not text:
+                    continue
+                confidences = [max(0.0, float(value)) for _, value in cleaned_tokens]
+                max_conf = max(confidences, default=0.0) / 100.0
+                strong_fraction = sum(value >= 50 for value in confidences) / max(1, len(confidences))
+                confidence = float(np.clip(0.70 * max_conf + 0.30 * strong_fraction, 0.0, 1.0))
+                score = float(0.72 * confidence + 0.18 * min(1.0, len(cleaned_tokens) / 5.0) + 0.10)
+                candidates.append({
+                    "variant": "targeted_row_band",
+                    "psm": psm,
+                    "text": text,
+                    "confidence": confidence,
+                    "words": [{"word": word, "confidence": round(value, 1)} for word, value in cleaned_tokens],
+                    "score": score,
+                })
+        if not candidates:
+            return None
+        # Prefer the candidate with the most coherent word count, then OCR
+        # confidence. This helps psm 11 retain a missing leading word while psm 6
+        # often gives the cleaner result for short rows.
+        return max(candidates, key=lambda item: (len(item["words"]), item["confidence"], item["score"]))
+    except Exception:
+        return None
+
 def _tesseract_reader(image: np.ndarray, psm: int = 7) -> Mapping[str, Any]:
     import pytesseract
     from pytesseract import Output
@@ -546,6 +652,21 @@ def extract_observation_text(
     try:
         candidates = _preprocessing_candidates(crop, expanded_crop)
         candidate_results = []
+        targeted_candidate = None
+        if ocr_reader is None:
+            targeted_candidate = _targeted_row_band_candidate(
+                gray, x1, refined_y1, x2, refined_y2)
+            if targeted_candidate is not None:
+                candidate_results.append(targeted_candidate)
+        # The targeted row-band reader is deliberately the fast path. When it
+        # returns a strong multi-word result, avoid 15 additional OCR variants;
+        # fall back to the broader ensemble only when the targeted evidence is
+        # weak or ambiguous.
+        strong_target = bool(
+            targeted_candidate is not None
+            and float(targeted_candidate.get("confidence", 0.0)) >= 0.90
+            and len(targeted_candidate.get("words", [])) >= 2
+        )
         if ocr_reader is not None:
             # Keep injected readers deterministic and single-call for callers
             # that supply an alternate OCR backend or test double.
@@ -556,7 +677,7 @@ def extract_observation_text(
                 "confidence": confidence, "words": word_evidence,
                 "score": _candidate_score(text, confidence, word_evidence),
             })
-        else:
+        elif not strong_target:
             for variant_name, processed in candidates:
                 for psm in (7, 6, 11):
                     data = _tesseract_reader(processed, psm)

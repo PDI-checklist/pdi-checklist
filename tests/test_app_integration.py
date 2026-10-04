@@ -101,7 +101,7 @@ def test_valid_multi_photo_batch_uses_one_normalized_jpc_and_one_write_call():
     assert normalize_jpc("VH-3009") == normalize_jpc("VH 3009") == normalize_jpc("VH3009")
 
 
-@pytest.mark.parametrize("failure", ["MISMATCH", "UNREADABLE", "MULTIPLE"])
+@pytest.mark.parametrize("failure", ["MISMATCH", "MULTIPLE"])
 def test_any_jpc_failure_rejects_entire_batch_before_dynamic_processing(failure):
     photos = [_photo("matching.jpg", 60), _photo("bad.jpg", 170)]
     bad = {
@@ -189,5 +189,67 @@ def test_invalid_entered_jpc_rejects_before_photo_processing():
     result, calls = _run([_photo("one.jpg", 80)], deps, adapter, entered="VH3009")
     assert result.status == "REJECTED"
     assert "mandatory hyphen" in result.message
+    assert calls == {"row": 0, "tick": 0, "ocr": 0}
+    assert adapter.calls == []
+
+
+def test_jpc_match_on_any_photo_allows_continuation_pages_without_jpc():
+    photos = [_photo("anchor.jpg", 70), _photo("continuation-1.jpg", 180), _photo("continuation-2.jpg", 200)]
+    deps = _harness(
+        {70: _jpc("VH-3009"), 180: _jpc(None, "UNREADABLE"), 200: _jpc(None, "UNREADABLE")},
+        {70: True, 180: True, 200: False},
+        {70: "Anchor observation", 180: "Continuation observation", 200: "Ignored"},
+    )
+    adapter = _RecordingUnavailableAdapter()
+    result, calls = _run(photos, deps, adapter)
+    assert result.status == "ERROR"
+    assert [item.status for item in result.photo_jpc_results] == ["MATCH", "UNREADABLE", "UNREADABLE"]
+    assert [r["Observation"] for r in result.observations] == ["Anchor observation", "Continuation observation"]
+    assert calls == {"row": 3, "tick": 3, "ocr": 2}
+    assert len(adapter.calls) == 1
+
+
+def test_matching_jpc_can_appear_on_second_photo():
+    photos = [_photo("page-1.jpg", 70), _photo("page-2.jpg", 180)]
+    deps = _harness(
+        {70: _jpc(None, "UNREADABLE"), 180: _jpc("VH-3009")},
+        {70: False, 180: True},
+        {180: "Second-page observation"},
+    )
+    adapter = _RecordingUnavailableAdapter()
+    result, calls = _run(photos, deps, adapter)
+    assert result.status == "ERROR"
+    assert [item.status for item in result.photo_jpc_results] == ["UNREADABLE", "MATCH"]
+    assert len(result.observations) == 1
+    assert result.observations[0]["Observation"] == "Second-page observation"
+    assert calls == {"row": 2, "tick": 2, "ocr": 1}
+
+
+def test_different_jpc_anywhere_rejects_entire_batch_even_if_matching_jpc_exists():
+    photos = [_photo("matching.jpg", 60), _photo("wrong.jpg", 170), _photo("continuation.jpg", 220)]
+    deps = _harness(
+        {60: _jpc("VH-3009"), 170: _jpc("VH-3010"), 220: _jpc(None, "UNREADABLE")},
+        {60: True, 170: True, 220: True},
+        {60: "Must not write", 170: "Must not write", 220: "Must not write"},
+    )
+    adapter = _RecordingUnavailableAdapter()
+    result, calls = _run(photos, deps, adapter)
+    assert result.status == "JPC_REJECTED"
+    assert result.observations == []
+    assert calls == {"row": 0, "tick": 0, "ocr": 0}
+    assert adapter.calls == []
+
+
+def test_all_continuation_pages_without_any_jpc_are_rejected():
+    photos = [_photo("page-1.jpg", 70), _photo("page-2.jpg", 180)]
+    deps = _harness(
+        {70: _jpc(None, "UNREADABLE"), 180: _jpc(None, "UNREADABLE")},
+        {70: True, 180: True},
+        {70: "Must not process", 180: "Must not process"},
+    )
+    adapter = _RecordingUnavailableAdapter()
+    result, calls = _run(photos, deps, adapter)
+    assert result.status == "JPC_REJECTED"
+    assert result.observations == []
     assert calls == {"row": 0, "tick": 0, "ocr": 0}
     assert adapter.calls == []

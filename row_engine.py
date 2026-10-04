@@ -164,10 +164,37 @@ def detect_checklist_rows(image: np.ndarray, *, perspective: bool = True,
     # Detect vertical rules by accumulating their slightly drifting strokes
     # across the table height; a high full-height threshold loses slanted rules.
     vband = vertical[y1:y2 + 1, x1:x2]
+    vband_origin_x = x1
     x_projection = (vband > 0).mean(axis=0)
     candidate_runs = [run for run in _runs(x_projection, 0.008) if run[1] - run[0] >= 3]
     candidates = _merge_centers(candidate_runs, max(8, w // 45))
     x_lines = [x1 + center for center in candidates]
+
+    # Long connected components in the vertical-line mask are a stronger
+    # fallback than raw projection peaks for photographed forms. Perspective,
+    # uneven lighting, and handwritten text can fragment a vertical rule into
+    # several projection peaks; a real table divider usually remains a tall
+    # connected component. This remains geometry-derived and contains no
+    # checklist-specific coordinates.
+    if len(x_lines) < 6:
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(vband, 8)
+        min_height = max(80, round((y2 - y1) * 0.35))
+        component_centers: list[int] = []
+        for component_id in range(1, count):
+            cx, cy, cw, ch, area = map(int, stats[component_id])
+            if ch < min_height or cw < 2:
+                continue
+            component_centers.append(x1 + round(cx + cw / 2))
+        component_centers.sort()
+        merged_components: list[int] = []
+        for center in component_centers:
+            if not merged_components or center - merged_components[-1] > max(8, w // 100):
+                merged_components.append(center)
+            else:
+                merged_components[-1] = round((merged_components[-1] + center) / 2)
+        if len(merged_components) >= 4:
+            x_lines = sorted(set([x1, *merged_components, x2]))
+
     if len(x_lines) >= 6:
         x1, x2 = x_lines[0], x_lines[-1]
     else:
@@ -184,6 +211,57 @@ def detect_checklist_rows(image: np.ndarray, *, perspective: bool = True,
                 clustered.append([x])
         x_lines = [round(float(np.mean(group))) for group in clustered]
         x1, x2 = x_lines[0], x_lines[-1]
+    # Refine the response-column boundaries from tall vertical components
+    # whenever available. Projection peaks can be displaced by perspective and
+    # text strokes; long components are the actual photographed grid rules.
+    count_v_refine, labels_v_refine, stats_v_refine, _ = cv2.connectedComponentsWithStats(vband, 8)
+    min_v_height_refine = max(80, round((y2 - y1) * 0.35))
+    tall_x: list[int] = []
+    for component_id in range(1, count_v_refine):
+        vx, vy, vw, vh, varea = map(int, stats_v_refine[component_id])
+        if vh >= min_v_height_refine and vw >= 2:
+            tall_x.append(vband_origin_x + vx)
+    tall_x = sorted(set(tall_x))
+    if len(tall_x) >= 3:
+        # Find the three tall rules that form the compact OK / NOT OK /
+        # trailing-remarks transition. Use the observed spacing, not fixed
+        # coordinates.
+        candidate_groups = []
+        for i in range(len(tall_x) - 2):
+            a, b, c = tall_x[i:i + 3]
+            left_gap, right_gap = b - a, c - b
+            if left_gap > 0 and right_gap > 0 and max(left_gap, right_gap) / min(left_gap, right_gap) < 2.2:
+                candidate_groups.append((i, a, b, c))
+        if candidate_groups:
+            _, response_left_i, response_mid_i, response_right_i = max(
+                candidate_groups, key=lambda item: (item[3] - item[1], -item[0]))
+            # Use the LEFT edge of each thick photographed rule as the cell
+            # boundary. The component centre can be displaced by half the
+            # printed line thickness, which is enough to clip the first/last
+            # observation words on small mobile photos.
+            def _component_left(target_center: int) -> int:
+                return min(tall_x, key=lambda value: abs(value - target_center))
+            # Recompute the candidate boundaries from component boxes so the
+            # actual cell edges, rather than component centres, are retained.
+            response_centers = [response_left_i, response_mid_i, response_right_i]
+            response_left = _component_left(response_centers[0])
+            response_mid = _component_left(response_centers[1])
+            response_right = _component_left(response_centers[2])
+            # The observation cell ends at the first tall rule before the
+            # response pair (normally the S.No/Observation divider).
+            left_tall = [x for x in tall_x if x < response_left - 20]
+            obs_left = max(left_tall) if left_tall else x1
+            x_lines = sorted(set([x1, obs_left, response_left, response_mid, response_right, x2]))
+            # Remove near-duplicates introduced by overlapping table edges.
+            clustered_lines: list[list[int]] = []
+            for x in x_lines:
+                if clustered_lines and x - clustered_lines[-1][-1] <= max(4, w // 300):
+                    clustered_lines[-1].append(x)
+                else:
+                    clustered_lines.append([x])
+            x_lines = [round(float(np.mean(group))) for group in clustered_lines]
+            x1, x2 = x_lines[0], x_lines[-1]
+
     if len(x_lines) < 4:
         raise ValueError("checklist columns were not detected")
 
@@ -205,16 +283,54 @@ def detect_checklist_rows(image: np.ndarray, *, perspective: bool = True,
     nok_left, nok_right = x_lines[nok_idx], x_lines[nok_idx + 1]
 
     local_h = horizontal[y1:y2 + 1, x1:x2]
-    row_y = _bounds(local_h, 1, 0.08)
-    row_y = sorted(set([y1, *[y1 + y for y in row_y if y > 1 and y < y2 - y1 - 1], y2]))
-    # Remove section/header bands by keeping the stable short-pitch run of rows
-    # that contains the greatest number of intervals.
+
+    # Photographed checklists often contain a mild page slope. Projection of
+    # the horizontal mask can merge several row rules or miss lower-page rules.
+    # Recover long horizontal connected components first; each component is a
+    # geometry-derived table rule, independent of checklist wording or fixed coordinates.
+    component_lines: list[int] = []
+    count_h, labels_h, stats_h, _ = cv2.connectedComponentsWithStats(local_h, 8)
+    min_line_width = max(40, round((x2 - x1) * 0.50))
+    for component_id in range(1, count_h):
+        cx, cy, cw, ch, area = map(int, stats_h[component_id])
+        if cw >= min_line_width and ch <= max(12, round(h * 0.03)):
+            component_lines.append(y1 + round(cy + ch / 2))
+    component_lines = sorted(set(component_lines))
+
+    if component_lines:
+        # Locate the top of the actual checklist grid from tall vertical
+        # components, then choose the nearest long horizontal rule as the top boundary.
+        v_component_tops: list[int] = []
+        count_v, labels_v, stats_v, _ = cv2.connectedComponentsWithStats(vband, 8)
+        min_v_height = max(80, round((y2 - y1) * 0.35))
+        response_xs = tuple(int(x) for x in x_lines[max(0, len(x_lines) - 4):])
+        x_tolerance = max(12, w // 35)
+        for component_id in range(1, count_v):
+            vx, vy, vw, vh, varea = map(int, stats_v[component_id])
+            center_x = vband_origin_x + vx + vw / 2.0
+            near_response_boundary = any(abs(center_x - rx) <= x_tolerance for rx in response_xs)
+            if vh >= min_v_height and vw >= 2 and near_response_boundary:
+                v_component_tops.append(y1 + vy)
+        if v_component_tops:
+            grid_top = min(v_component_tops)
+            top_rule = min(component_lines, key=lambda value: abs(value - grid_top))
+            bottom_rule = max(component_lines)
+            selected_lines = [value for value in component_lines if top_rule <= value <= bottom_rule]
+            row_y = selected_lines if len(selected_lines) >= 4 else sorted(set([y1, *component_lines, y2]))
+        else:
+            row_y = component_lines
+    else:
+        row_y = _bounds(local_h, 1, 0.08)
+        row_y = sorted(set([y1, *[y1 + y for y in row_y if y > 1 and y < y2 - y1 - 1], y2]))
+
     intervals = [(a, b) for a, b in zip(row_y, row_y[1:]) if b - a >= max(5, h // 250)]
     if not intervals:
         raise ValueError("checklist rows were not detected")
     heights = np.array([b - a for a, b in intervals])
     typical = float(np.median(heights))
-    data_intervals = [(a, b) for a, b in intervals if (b - a) <= typical * 1.8]
+    # Preserve wrapped observation rows, while dropping only clearly abnormal
+    # non-row bands such as large signature/metadata blocks.
+    data_intervals = [(a, b) for a, b in intervals if (b - a) <= max(typical * 1.8, float(np.percentile(heights, 90)))]
     if len(data_intervals) < min_rows:
         raise ValueError(f"only {len(data_intervals)} checklist rows detected")
 

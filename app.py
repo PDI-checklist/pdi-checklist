@@ -12,6 +12,7 @@ from openpyxl.styles import Alignment, Font
 from app_pipeline import process_upload_batch
 from central_config import build_central_adapter
 from central_write_adapter import WriteStatus
+from metadata_engine import load_checklist_departments
 from photo_engine import build_report, load_mapping, load_raw_data
 
 
@@ -59,6 +60,9 @@ st.title("📋 PDI Photo Upload – Phase 2")
 st.caption("JPC validation → Dynamic row/tick detection → Observation text → Batch submission")
 
 mapping, conflicts, raw = load_report_data()
+checklist_departments = load_checklist_departments(os.path.join(BASE, "master", "Observation_Checklist.xlsx"))
+combined_mapping = dict(checklist_departments)
+combined_mapping.update(mapping)
 
 with st.form("upload"):
     inspector = st.text_input("Inspector Name *", placeholder="e.g. Harish")
@@ -80,8 +84,9 @@ if submitted:
 
     photo_payloads = [{"filename": photo.name, "data": photo.getvalue()} for photo in photos]
     result = process_upload_batch(inspector, entered_jpc, photo_payloads,
-                                  central_adapter=CENTRAL_ADAPTER)
-    st.subheader("Per-photo JPC validation")
+                                  central_adapter=CENTRAL_ADAPTER,
+                                  metadata_mapping=combined_mapping)
+    st.subheader("Batch JPC validation")
     jpc_rows = [{"Photo": check.filename, "Status": check.status,
                  "Candidates": ", ".join(check.candidates), "Reason": check.reason}
                 for check in result.photo_jpc_results]

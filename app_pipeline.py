@@ -13,8 +13,9 @@ from central_write_adapter import (
     CentralWriteAdapter, CentralWriteResult, UnconfiguredCentralWriteAdapter,
     WriteStatus,
 )
-from jpc_engine import (JPCExtraction, extract_jpc_candidates, is_valid_entered_jpc, normalize_jpc)
+from jpc_engine import (JPCExtraction, extract_jpc_candidates, is_valid_entered_jpc, normalize_jpc, jpc_anchor_crop, jpc_anchor_similarity)
 from observation_engine import extract_observations_for_rows
+from metadata_engine import enrich_observation, extract_checklist_date
 from row_engine import detect_checklist_rows
 from tick_engine import detect_not_ok_marks
 
@@ -86,6 +87,7 @@ def process_upload_batch(
     row_detector: Callable[..., Any] = detect_checklist_rows,
     tick_detector: Callable[..., Any] = detect_not_ok_marks,
     observation_extractor: Callable[..., Any] = extract_observations_for_rows,
+    metadata_mapping: Mapping[str, Any] | None = None,
 ) -> BatchResult:
     """Validate every page before running dynamic processing or one batch write."""
     start = time.perf_counter()
@@ -109,12 +111,35 @@ def process_upload_batch(
 
     jpc_started = time.perf_counter()
     validations: list[PhotoJPCValidation] = []
+    confirmed_anchor = None
+    checklist_date = ""
     for filename, image in decoded:
         if image is None:
             validations.append(PhotoJPCValidation(filename, "UNREADABLE", (),
                                                   "Photo could not be decoded; JPC is unreadable."))
             continue
-        extraction = jpc_extractor(image)
+        # Once one page has a confirmed JPC, use the same-batch visual anchor
+        # before expensive OCR on later pages. This is important for 4-5 page
+        # mobile uploads where only some pages repeat the JPC field.
+        if confirmed_anchor is not None:
+            try:
+                crop = jpc_anchor_crop(image)
+                if crop is None:
+                    validations.append(PhotoJPCValidation(filename, "UNREADABLE", (),
+                                                          "No JPC field detected; treated as continuation page."))
+                    continue
+                if jpc_anchor_similarity(confirmed_anchor, crop) >= 0.80:
+                    validations.append(PhotoJPCValidation(filename, "MATCH", (entered_jpc.strip().upper(),),
+                                                          "Matched to confirmed batch JPC anchor."))
+                    if not checklist_date:
+                        checklist_date = extract_checklist_date(image)
+                    continue
+            except Exception:
+                pass
+        try:
+            extraction = jpc_extractor(image, normalized_expected)
+        except TypeError:
+            extraction = jpc_extractor(image)
         candidates = tuple(str(candidate) for candidate in extraction.candidates)
         if extraction.status == "MULTIPLE" or len(candidates) > 1:
             validations.append(PhotoJPCValidation(filename, "MULTIPLE", candidates,
@@ -127,19 +152,48 @@ def process_upload_batch(
                                                   "Detected JPC does not match the entered JPC."))
         else:
             validations.append(PhotoJPCValidation(filename, "MATCH", candidates))
+            if confirmed_anchor is None:
+                confirmed_anchor = jpc_anchor_crop(image)
+            if not checklist_date:
+                checklist_date = extract_checklist_date(image)
     timings["jpc_validation"] = (time.perf_counter() - jpc_started) * 1000
 
-    failures = [item for item in validations if item.status != "MATCH"]
-    if failures:
+    # Batch-level JPC rule:
+    # - At least one uploaded photo must contain a readable JPC matching the entered JPC.
+    # - Photos without a readable JPC are allowed (continuation pages).
+    # - A confidently detected different JPC rejects the entire batch.
+    # - Multiple JPC candidates on one photo are rejected because the page is ambiguous.
+    matches = [item for item in validations if item.status == "MATCH"]
+    mismatches = [item for item in validations if item.status == "MISMATCH"]
+    multiples = [item for item in validations if item.status == "MULTIPLE"]
+    if mismatches or multiples:
         timings["total"] = (time.perf_counter() - start) * 1000
-        return BatchResult("JPC_REJECTED", "Batch rejected: every photo must contain exactly one matching JPC.",
+        reason = "A different JPC was detected in the uploaded batch." if mismatches else "Multiple JPC candidates were detected in an uploaded photo."
+        return BatchResult("JPC_REJECTED", f"Batch rejected: {reason}",
+                           normalized_expected, validations, timings_ms=timings)
+    if not matches:
+        timings["total"] = (time.perf_counter() - start) * 1000
+        return BatchResult("JPC_REJECTED", "Batch rejected: no uploaded photo contained a readable matching JPC.",
                            normalized_expected, validations, timings_ms=timings)
 
     records: list[dict[str, Any]] = []
     for filename, image in decoded:
         assert image is not None
         row_started = time.perf_counter()
-        geometry = row_detector(image)
+        try:
+            # Mobile checklist photos are processed without forcing a page warp.
+            # The geometry engine already derives the grid from the photographed
+            # rules; avoiding an unnecessary warp preserves small handwritten
+            # ticks and printed observation text. Injected test doubles may only
+            # accept the image argument, so fall back to their original contract.
+            try:
+                geometry = row_detector(image, perspective=False)
+            except TypeError:
+                geometry = row_detector(image)
+        except Exception:
+            # Keep the existing detector as a final geometry fallback for
+            # unusual layouts where perspective correction is genuinely needed.
+            geometry = row_detector(image)
         timings["row_detection"] = timings.get("row_detection", 0.0) + (time.perf_counter() - row_started) * 1000
 
         tick_started = time.perf_counter()
@@ -156,7 +210,7 @@ def process_upload_batch(
         for tick in confirmed:
             row_index = int(_field(tick, "row_index", -1))
             observation = by_row.get(row_index)
-            records.append({
+            base_record = {
                 "JPC Number": normalized_expected,
                 "Inspector Name": str(inspector).strip(),
                 "Observation": str(_field(observation, "text", "") or "").strip(),
@@ -164,7 +218,11 @@ def process_upload_batch(
                 "OCR Confidence": float(_field(observation, "confidence", 0.0) or 0.0),
                 "Source Photo": filename,
                 "Source Row": row_index,
-            })
+            }
+            records.append(enrich_observation(
+                base_record, mapping=metadata_mapping, inspector=str(inspector),
+                closure_date=checklist_date
+            ))
 
     deduplicated = _deduplicate_records(records)
     if not deduplicated:
